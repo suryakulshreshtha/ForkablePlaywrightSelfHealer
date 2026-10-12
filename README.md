@@ -1,5 +1,7 @@
 # ForkablePlaywrightSelfHealer
 
+[![CI](https://github.com/suryakulshreshtha/ForkablePlaywrightSelfHealer/actions/workflows/ci.yml/badge.svg)](https://github.com/suryakulshreshtha/ForkablePlaywrightSelfHealer/actions/workflows/ci.yml)
+
 Skunkworks projects exploring what local, offline AI agents can actually do —
 no cloud APIs, no telemetry, no network.
 
