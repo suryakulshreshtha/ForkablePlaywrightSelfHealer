@@ -47,7 +47,7 @@ warn_on_ambiguous = true     # flag heals that matched more than one element
 # "fail" refuses, "first" acts silently. Assertions (expect_*) always fail on
 # ambiguity regardless - a check against "one of three" proves nothing. Use
 # "fail" for destructive flows (delete, pay, send).
-on_ambiguous = "warn"
+on_ambiguous = "warn"        # <-- change to "fail" for delete/pay/send flows
 
 # Healing is for elements that *changed*, not elements that have not rendered
 # yet. The ladder is re-tried for up to settle_ms before any heal is attempted,
@@ -75,7 +75,7 @@ viewport_height = 800
 default_timeout_ms = 5000
 trace = false                       # keep a Playwright trace for every run
 trace_on_failure = true             # ...or only when the run did not pass
-ignore_https_errors = false         # TLS errors fail by default; opt in for self-signed targets
+ignore_https_errors = false         # <-- change to true only for self-signed HTTPS targets
 no_sandbox = "auto"                 # auto | always | never. auto = only as root / in a container / on CI
 capture_diagnostics = true          # console errors, page errors, failed requests, HTTP >= 400
 artifacts_dir = ".forkable/artifacts"
