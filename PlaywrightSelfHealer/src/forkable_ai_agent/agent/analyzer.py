@@ -22,15 +22,20 @@ ANALYZE_SYSTEM = (
 
 # (pattern, category, cause, fix)
 _PATTERNS: list[tuple[re.Pattern[str], str, str, str]] = [
-    (re.compile(r"could not locate|ElementNotFound|no element matches|strict mode violation", re.I),
+    # Must precede selector_not_found: our own AmbiguousMatch message and
+    # Playwright's strict-mode error both say "could not locate" / "strict mode
+    # violation", and a broader pattern listed first used to swallow them, so
+    # this category could never be produced.
+    (re.compile(r"strict mode violation.*resolved to \d+ elements|AmbiguousMatch", re.I | re.S),
+     "ambiguous_selector",
+     "The selector matched several elements, so it does not identify one control.",
+     "Narrow the description or scope the locator to a container; add a data-testid "
+     "to the intended element."),
+    (re.compile(r"could not locate|ElementNotFound|no element matches", re.I),
      "selector_not_found",
      "The element description did not bind to any element on the page.",
      "Check the page actually rendered the control, then let the healer re-bind it; "
      "add a data-testid to make the binding permanent."),
-    (re.compile(r"strict mode violation.*resolved to \d+ elements", re.I),
-     "ambiguous_selector",
-     "The selector matched several elements.",
-     "Narrow the description or scope the locator to a container."),
     (re.compile(r"Timeout .*exceeded|TimeoutError|waiting for", re.I),
      "timeout",
      "The action timed out waiting for the element or navigation.",
@@ -140,7 +145,42 @@ class FailureAnalyzer:
             f"step {failed.index}: {failed.step.action} target={failed.step.target!r} "
             f"value={failed.step.value!r} selector={failed.selector} strategy={failed.strategy}"
         )
-        return self.analyze_text(failed.message, context)
+        evidence = describe_page_evidence(getattr(result, "diagnostics", None) or {})
+        if evidence:
+            context += f"\nThe page itself reported: {evidence}"
+        diagnosis = self.analyze_text(failed.message, context)
+        if evidence:
+            diagnosis.likely_cause = f"{diagnosis.likely_cause} The page itself reported: {evidence}".strip()
+            if (getattr(result, "diagnostics", None) or {}).get("page_errors"):
+                diagnosis.suggested_fix = (
+                    "Fix the uncaught JavaScript error first - a control that never rendered is "
+                    f"usually a symptom of it. {diagnosis.suggested_fix}"
+                ).strip()
+        return diagnosis
+
+
+def describe_page_evidence(diagnostics: dict[str, list[str]], limit: int = 2) -> str:
+    """One line summarising what the page reported while the plan ran.
+
+    A test that fails with "could not locate" is often reporting a symptom: the
+    app threw, a request failed, and the control never rendered. Putting that in
+    the diagnosis saves the reader from re-deriving it from a screenshot.
+    """
+    labels = (
+        ("page_errors", "uncaught JavaScript error"),
+        ("console_errors", "console error"),
+        ("failed_requests", "failed request"),
+        ("http_errors", "HTTP error response"),
+    )
+    parts: list[str] = []
+    for key, label in labels:
+        items = diagnostics.get(key) or []
+        if not items:
+            continue
+        shown = "; ".join(str(i)[:140] for i in items[:limit])
+        more = f" (+{len(items) - limit} more)" if len(items) > limit else ""
+        parts.append(f"{len(items)} {label}{'s' if len(items) != 1 else ''}: {shown}{more}")
+    return " | ".join(parts)
 
 
 def _parse_analysis(text: str) -> dict:

@@ -1,4 +1,4 @@
-#PlaywrightSelfHealer
+# PlaywrightSelfHealer
 
 ![CI](https://github.com/suryakulshreshtha/ForkablePlaywrightSelfHealer/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
@@ -210,7 +210,7 @@ Nothing here hard-fails because a dependency is missing.
 ## Testing
 
 ```bash
-make test        # 125 tests
+make test        # the offline suite (no browser, no model)
 make test-e2e    # the 5 that need real Chromium
 make ci          # everything the GitHub workflow runs, locally
 make docker      # the suite inside the pinned Playwright image
@@ -264,6 +264,39 @@ hundred engineering notes does not justify a dependency tree that is painful to
 mirror onto an air-gapped machine. If you want them to share a store, install
 the extra and set `backend = "chroma"` in `config/agent.toml` —
 `rag/chroma_store.py` is a drop-in with telemetry disabled.
+
+## Trust model: what the healer will and will not do
+
+Self-healing is only useful if you can believe a green run. The defaults are
+chosen so a heal can be wrong in a *loud* way, never a quiet one.
+
+- **Assertions never heal.** `should see ...`, `... should be visible` and value
+  checks fail when their element is missing or ambiguous. Opt in with
+  `healer.heal_assertions = true`.
+- **Role-aware binding.** "log in button" cannot bind to a heading that
+  contains the words, "username field" cannot bind to a button, and "log in
+  help" is not "log in".
+- **Ambiguity is visible.** An action that matches several elements acts on the
+  first and records an event; set `healer.on_ambiguous = "fail"` for destructive
+  flows. Assertions always fail on ambiguity.
+- **Wait before healing.** The locator ladder is retried for `healer.settle_ms`
+  and the DOM must go quiet before a snapshot, so a slow page is not mistaken
+  for a changed one.
+- **Heals are a transaction.** A heal is saved only if its run passed
+  (`healer.commit_policy = "on_pass"`). Heals from failed runs are parked under
+  `proposals` in `memory.json` and listed in the report.
+- **Evidence on failure.** Console errors, uncaught page errors, failed
+  requests and HTTP >= 400 responses are attached to the result and folded into
+  the diagnosis; a trace is kept for failed runs (`browser.trace_on_failure`).
+- **Safe browser defaults.** TLS errors fail (`browser.ignore_https_errors`),
+  and Chromium's sandbox is only disabled where it cannot work
+  (`browser.no_sandbox = "auto"`).
+
+Two benchmarks keep these claims measurable:
+`scripts/benchmark_healing.py` (hand-labelled) and
+`scripts/mutation_benchmark.py` (generated: renamed ids, churned classes,
+wrappers, reworded copy, look-alike decoys, removed controls). Both run in CI
+with a zero-false-heal budget.
 
 ## Known nuances
 

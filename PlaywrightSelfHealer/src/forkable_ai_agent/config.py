@@ -79,7 +79,19 @@ class BrowserConfig:
     viewport_height: int = 800
     default_timeout_ms: int = 5000
     trace: bool = False
+    #: Record a trace for every run but keep it only when the run fails. A
+    #: failed run you cannot replay is a failed run you cannot debug.
+    trace_on_failure: bool = True
     artifacts_dir: str = ".forkable/artifacts"
+    #: TLS errors fail the page load unless you opt out. Tests that quietly
+    #: ignore certificate errors cannot tell you the certificate broke.
+    ignore_https_errors: bool = False
+    #: Chromium's sandbox: "auto" disables it only where it cannot work (root,
+    #: a container, or CI); "always" / "never" force it.
+    no_sandbox: str = "auto"
+    #: Collect console errors, uncaught page errors, failed requests and HTTP
+    #: >= 400 responses, and attach them to a failed run.
+    capture_diagnostics: bool = True
 
 
 @dataclass
@@ -103,11 +115,61 @@ class VisualConfig:
 
 
 @dataclass
+class HealerConfig:
+    """Tunables for locator resolution and healing.
+
+    These govern every heal the agent performs, so they belong in config where
+    they can be tuned and version-controlled, not buried as constructor
+    defaults. `scripts/benchmark_healing.py` reports precision and recall for a
+    given pair, which is how these are meant to be chosen.
+    """
+
+    #: Below this the heal is refused outright and ElementNotFound is raised.
+    heuristic_threshold: float = 0.34
+    #: Below this the local model is asked to break the tie (if one is loaded).
+    ask_llm_below: float = 0.62
+    #: Per-candidate budget when walking the locator ladder. Deliberately much
+    #: shorter than browser.default_timeout_ms: a candidate that is not on the
+    #: page is never *slowly* not on the page, and the ladder can be eight rungs
+    #: deep. At the browser default that is 8 x 5s of dead wait per element
+    #: before healing has even started.
+    candidate_timeout_ms: int = 250
+    #: A healed selector matching more than one element is flagged as ambiguous
+    #: rather than silently resolving to .first.
+    warn_on_ambiguous: bool = True
+    #: What to do when the best selector for an *action* matches several
+    #: elements: "warn" (act on the first, record an event), "fail" (refuse), or
+    #: "first" (act on the first, silently). Assertions never use "warn": an
+    #: assertion against an arbitrary one of N elements proves nothing, so they
+    #: fail on ambiguity unless this is explicitly "first".
+    on_ambiguous: str = "warn"
+    #: How long to keep re-walking the locator ladder before concluding an
+    #: element is gone. Healing against a half-rendered page binds the wrong
+    #: element and caches it, so the ladder gets a chance to see the finished
+    #: DOM first. 0 disables the wait.
+    settle_ms: int = 1500
+    settle_interval_ms: int = 150
+    #: Before taking a healing snapshot, wait until the DOM has stopped mutating
+    #: for this long (capped by settle_ms). 0 disables.
+    dom_quiet_ms: int = 150
+    #: Assertions (expect_visible / expect_value) report a missing element as a
+    #: failure. A missing element is a real defect more often than a renamed
+    #: hook, and healing it away turns a red test green. Opt in only if you
+    #: accept that trade.
+    heal_assertions: bool = False
+    #: "on_pass": heals made during a run are saved only if the run passes;
+    #: otherwise they are discarded into memory.proposals for review.
+    #: "always": save every heal immediately (the pre-hardening behaviour).
+    commit_policy: str = "on_pass"
+
+
+@dataclass
 class Settings:
     offline: bool = True               # hard-block non-loopback sockets
     llm: LLMConfig = field(default_factory=LLMConfig)
     rag: RAGConfig = field(default_factory=RAGConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
+    healer: HealerConfig = field(default_factory=HealerConfig)
     app: AppConfig = field(default_factory=AppConfig)
     visual: VisualConfig = field(default_factory=VisualConfig)
     memory_path: str = ".forkable/memory.json"
@@ -160,6 +222,10 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> Settings
     settings.browser.headless = _as_bool(
         env.get("FORKABLE_HEADLESS"), settings.browser.headless
     )
+    settings.browser.ignore_https_errors = _as_bool(
+        env.get("FORKABLE_IGNORE_HTTPS_ERRORS"), settings.browser.ignore_https_errors
+    )
+    settings.browser.no_sandbox = env.get("FORKABLE_NO_SANDBOX", settings.browser.no_sandbox)
     settings.memory_namespace = env.get("FORKABLE_MEMORY_NS", settings.memory_namespace)
     if env.get("FORKABLE_APP_PORT"):
         settings.app.port = int(env["FORKABLE_APP_PORT"])

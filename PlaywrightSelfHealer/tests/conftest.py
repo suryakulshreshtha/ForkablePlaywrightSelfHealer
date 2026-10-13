@@ -44,6 +44,10 @@ def settings(tmp_path, demo_app):
     cfg.visual.baseline_dir = str(tmp_path / "baselines")
     cfg.visual.diff_dir = str(tmp_path / "diffs")
     cfg.browser.artifacts_dir = str(tmp_path / "artifacts")
+    # The demo pages are static, so waiting for them to "settle" only slows the
+    # suite down. Tests that exercise the wait set these explicitly.
+    cfg.healer.settle_ms = 0
+    cfg.healer.dom_quiet_ms = 0
     return cfg
 
 

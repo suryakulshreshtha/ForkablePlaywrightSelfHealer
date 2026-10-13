@@ -13,8 +13,9 @@ key so a healed selector survives across runs.
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,6 +40,28 @@ _STOP = {"the", "a", "an", "please", "element"}
 
 # Attributes commonly used as stable test hooks, in order of preference.
 TESTID_ATTRS = ("data-testid", "data-test-id", "data-test", "data-qa", "data-cy")
+
+#: Phrases that mean the same control but share no characters, so no amount of
+#: fuzzy string matching connects them. Symmetric: each key expands to its
+#: alternates. Small and hand-audited on purpose -- every entry added here is a
+#: chance to heal to the wrong element, so a new one should come with a case in
+#: tests/fixtures/healing_benchmark.json.
+_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "log in": ("sign in", "login", "signin", "auth"),
+    "login": ("sign in", "signin", "log in", "auth"),
+    "sign in": ("log in", "login", "signin", "auth"),
+    "signin": ("log in", "login", "sign in", "auth"),
+    "log out": ("sign out", "logout", "signout"),
+    "logout": ("sign out", "signout", "log out"),
+    "sign up": ("register", "signup", "create account"),
+    "signup": ("register", "sign up", "create account"),
+    "register": ("sign up", "signup", "create account"),
+    "delete": ("remove", "destroy"),
+    "remove": ("delete", "destroy"),
+    "submit": ("send", "confirm", "save"),
+    "cancel": ("dismiss", "close", "abort"),
+    "search": ("query", "find", "q"),
+}
 
 
 def normalise(description: str) -> str:
@@ -78,6 +101,20 @@ def variants(description: str) -> list[str]:
     if len(parts) > 1:
         out.append(parts[-1])
         out.append(parts[0])
+
+    # Synonym families. A rename from "log in" to "sign in" is the single most
+    # common auth-button change there is, and no amount of character-level
+    # fuzziness connects the two - they share no prefix, no substring and no
+    # trigram. Kept deliberately small and hand-audited; this is a place where
+    # a large list would start healing to the wrong element.
+    for phrase, alternates in _SYNONYMS.items():
+        if phrase == joined or phrase == " ".join(parts):
+            for alt in alternates:
+                alt_parts = alt.split()
+                out.extend([
+                    "-".join(alt_parts), "_".join(alt_parts), "".join(alt_parts),
+                ])
+
     seen: list[str] = []
     for item in out:
         if item and item not in seen:
@@ -100,7 +137,128 @@ def guess_role(description: str, action: str = "") -> str:
 
 
 def _escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    """Escape for the inside of a double-quoted literal. Kept for callers that
+    already wrap the quotes themselves; new code should use :func:`py_literal`."""
+    return py_literal(value)[1:-1]
+
+
+def py_literal(value: str) -> str:
+    """A complete, double-quoted Python string literal for *value*.
+
+    ``json.dumps`` escapes every control character (newlines included), so a
+    value can never end the line or the string it sits in. The previous
+    implementation escaped only backslashes and quotes, which let a newline in
+    a ``css=...`` target or a note break out of the emitted statement.
+    """
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Element *kind* - "log in button" must not bind to an <h1> that contains the
+# words. A description that ends in a UI noun names a kind of element; a hit of
+# the wrong kind is a miss, however well its text matches.
+# ---------------------------------------------------------------------------
+_NOUN_ROLE = {
+    "button": "button", "btn": "button",
+    "link": "link",
+    "checkbox": "checkbox",
+    "radio": "radio",
+    "field": "textbox", "input": "textbox", "textbox": "textbox",
+    "dropdown": "combobox", "select": "combobox", "combobox": "combobox",
+    "tab": "tab",
+    "heading": "heading",
+}
+_BUTTON_INPUT_TYPES = {"submit", "button", "reset", "image"}
+_NON_TEXT_INPUT_TYPES = _BUTTON_INPUT_TYPES | {"checkbox", "radio", "hidden", "file", "range", "color"}
+_TEXTBOX_ROLES = {"textbox", "searchbox", "combobox", "spinbutton"}
+_HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+#: Elements that are never what a user means by "the X button/link/tab". Used as
+#: a reject-list rather than an allow-list because clickable <div>/<span> with no
+#: role are common, and refusing them would break UIs that work fine today.
+_NOT_CLICKABLE_TAGS = _HEADING_TAGS | {
+    "p", "label", "ul", "ol", "table", "tr", "form", "fieldset", "textarea", "select", "img",
+}
+
+
+def _clickable_kind(tag: str, kind: str, role: str) -> bool:
+    if role in {"button", "link", "tab", "menuitem"}:
+        return True
+    if tag == "input":
+        return kind in _BUTTON_INPUT_TYPES  # a text box is not a button
+    return tag not in _NOT_CLICKABLE_TAGS
+
+
+#: Words that turn "X" into a *different* control about X: "Log in help" is not
+#: the log-in button, "Privacy policy" is not "Privacy". Deliberately short; a
+#: longer list starts rejecting legitimate labels.
+QUALIFIER_WORDS = frozenset({
+    "help", "faq", "learn", "policy", "privacy", "tutorial", "guide", "docs", "documentation",
+})
+
+
+def qualifier_clash(description: str, visible_text: str) -> bool:
+    """True when the element's words add a qualifier the description never asked for."""
+    wanted = set(tokens(description))
+    extra = {t for t in tokens(visible_text or "") if t in QUALIFIER_WORDS}
+    return bool(extra - wanted)
+
+
+def explicit_role(description: str) -> str:
+    """Role named by a trailing UI noun, or ``""`` when the description names none.
+
+    Only an explicit noun counts. Inferring a role from content words ("message",
+    "password") is what :func:`guess_role` is for; using that here would reject
+    legitimate matches on a hunch.
+    """
+    parts = tokens(description)
+    if len(parts) < 2:
+        return ""
+    if parts[-2:] == ["text", "box"]:
+        return "textbox"
+    if parts[-2:] == ["check", "box"]:
+        return "checkbox"
+    return _NOUN_ROLE.get(parts[-1], "")
+
+
+def _role_matches(expected: str, info: Mapping[str, Any]) -> bool:
+    tag = str(info.get("tag") or "")
+    kind = str(info.get("type") or "")
+    role = str(info.get("role") or "")
+    editable = bool(info.get("editable"))
+    if expected in {"button", "link", "tab"}:
+        # <a class="btn"> is a button to every user, and so is a clickable div.
+        return _clickable_kind(tag, kind, role)
+    if expected == "checkbox":
+        return (tag == "input" and kind == "checkbox") or role in {"checkbox", "switch"}
+    if expected == "radio":
+        return (tag == "input" and kind == "radio") or role == "radio"
+    if expected == "textbox":
+        return (tag == "input" and kind not in _NON_TEXT_INPUT_TYPES) or tag == "textarea" \
+            or editable or role in _TEXTBOX_ROLES
+    if expected == "combobox":
+        return tag == "select" or role in {"combobox", "listbox"}
+    if expected == "heading":
+        return tag in _HEADING_TAGS or role == "heading"
+    return True
+
+
+def _action_matches(action: str, info: Mapping[str, Any]) -> bool:
+    tag = str(info.get("tag") or "")
+    kind = str(info.get("type") or "")
+    role = str(info.get("role") or "")
+    if action in {"fill", "expect_value"}:
+        return tag in {"input", "textarea", "select"} or bool(info.get("editable")) \
+            or role in _TEXTBOX_ROLES
+    if action in {"check", "uncheck"}:
+        return (tag == "input" and kind in {"checkbox", "radio"}) or role in {"checkbox", "radio", "switch"}
+    if action == "select":
+        return tag == "select" or role in {"combobox", "listbox"}
+    return True
+
+
+def shape_ok(expected_role: str, action: str, info: Mapping[str, Any]) -> bool:
+    """True when an element of shape *info* can serve this description and action."""
+    return _role_matches(expected_role, info) and _action_matches(action, info)
 
 
 @dataclass
@@ -132,14 +290,14 @@ class LocatorCandidate:
     def code(self, var: str = "page") -> str:
         if self.kind == "role":
             exact = ", exact=True" if self.exact else ""
-            return f'{var}.get_by_role("{self.role or "button"}", name="{_escape(self.value)}"{exact})'
+            return f"{var}.get_by_role({py_literal(self.role or 'button')}, name={py_literal(self.value)}{exact})"
         if self.kind in {"label", "placeholder", "text"}:
             method = {"label": "get_by_label", "placeholder": "get_by_placeholder", "text": "get_by_text"}[self.kind]
             exact = ", exact=True" if self.exact else ""
-            return f'{var}.{method}("{_escape(self.value)}"{exact})'
+            return f"{var}.{method}({py_literal(self.value)}{exact})"
         if self.kind == "xpath":
-            return f'{var}.locator("xpath={_escape(self.value)}")'
-        return f'{var}.locator("{_escape(self.value)}")'
+            return f"{var}.locator({py_literal('xpath=' + self.value)})"
+        return f"{var}.locator({py_literal(self.value)})"
 
     # -- persistence ---------------------------------------------------
     @property

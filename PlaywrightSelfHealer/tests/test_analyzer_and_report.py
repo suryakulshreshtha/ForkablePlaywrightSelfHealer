@@ -70,3 +70,48 @@ def test_html_escapes_hostile_content(settings):
     result = _sample_result()
     result.steps[1].message = "<script>alert('xss')</script>"
     assert "<script>alert" not in render_html(result)
+
+
+# -- report additions ---------------------------------------------------------
+def _failed_result(settings):
+    from forkable_ai_agent.schema import RunResult, Step, StepResult, TestPlan
+
+    plan = TestPlan(name="rep", steps=[Step("click", "log in button")], base_url="http://x")
+    result = RunResult(plan=plan)
+    result.status = "failed"
+    result.steps.append(StepResult(
+        index=1, step=plan.steps[0], status="failed",
+        message="AmbiguousMatch: could not locate 'log in button' uniquely: strict mode violation"))
+    result.diagnostics = {"page_errors": ["TypeError: <b>boom</b>"], "http_errors": ["500 GET /api"]}
+    result.artifacts["trace"] = "/tmp/run/trace.zip"
+    return result
+
+
+def test_report_shows_page_evidence_ambiguity_and_trace(settings):
+    from forkable_ai_agent.reporting.html_report import render_html
+
+    page = render_html(_failed_result(settings))
+    assert "What the page reported" in page and "Uncaught JavaScript errors (1)" in page
+    assert "&lt;b&gt;boom&lt;/b&gt;" in page and "<b>boom</b>" not in page   # escaped
+    assert "Ambiguous selectors" in page
+    assert "show-trace" in page
+
+
+def test_report_lists_heals_held_for_review(settings, tmp_path):
+    from forkable_ai_agent.agent.memory import Memory
+    from forkable_ai_agent.reporting.html_report import render_html
+
+    memory = Memory(tmp_path / "m.json")
+    memory.proposals.append({"description": "username", "scope": "/login", "key": "css||0|#x",
+                             "strategy": "healed-id", "at": 0, "reason": "run did not pass"})
+    assert "Heals held for review" in render_html(_failed_result(settings), memory)
+
+
+def test_clean_pass_hides_page_evidence(settings):
+    from forkable_ai_agent.reporting.html_report import render_html
+
+    result = _failed_result(settings)
+    result.status = "passed"
+    result.diagnostics = {"console_errors": ["noisy"]}
+    result.steps[0].message = ""
+    assert "What the page reported" not in render_html(result)

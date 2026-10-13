@@ -1,0 +1,129 @@
+{
+  "_comment": [
+    "Labelled healing set. Each case is a page the agent has never seen, a",
+    "human description, and the id of the element a competent human would pick.",
+    "",
+    "This is the ground truth the scorer is measured against. Add a case",
+    "whenever a real heal surprises you -- that is how the set earns its keep.",
+    "Mutation kinds mirror what actually breaks selectors in production:",
+    "  renamed_id      a developer renamed the hook",
+    "  dropped_testid  the test hook was deleted outright",
+    "  reordered       the DOM moved but nothing was renamed",
+    "  i18n            visible text changed language",
+    "  restructured    the element was wrapped or moved in the tree",
+    "  distractor      several plausible elements, only one correct"
+  ],
+  "cases": [
+    {
+      "id": "renamed-login-button",
+      "mutation": "renamed_id",
+      "description": "log in button",
+      "action": "click",
+      "expect": "signin-submit",
+      "html": "<html><body><form><input id='u' name='username'><input id='p' type='password' name='password'><button id='signin-submit'>Sign in</button></form></body></html>"
+    },
+    {
+      "id": "renamed-username-field",
+      "mutation": "renamed_id",
+      "description": "username field",
+      "action": "fill",
+      "expect": "user-name-input",
+      "html": "<html><body><form><input id='user-name-input' name='userName' placeholder='Your name'><input id='pw' type='password'></form></body></html>"
+    },
+    {
+      "id": "password-to-passphrase",
+      "mutation": "renamed_id",
+      "description": "password field",
+      "action": "fill",
+      "expect": "signin-passphrase",
+      "html": "<html><body><form><input id='email' name='email'><input id='signin-passphrase' type='password' name='passphrase'></form></body></html>"
+    },
+    {
+      "id": "dropped-testid-falls-back-to-aria",
+      "mutation": "dropped_testid",
+      "description": "submit order button",
+      "action": "click",
+      "expect": "checkout-go",
+      "html": "<html><body><button id='cancel-x'>Cancel</button><button id='checkout-go' aria-label='Submit order'>Go</button></body></html>"
+    },
+    {
+      "id": "dropped-testid-falls-back-to-label",
+      "mutation": "dropped_testid",
+      "description": "email address",
+      "action": "fill",
+      "expect": "f2",
+      "html": "<html><body><label for='f1'>Full name</label><input id='f1'><label for='f2'>Email address</label><input id='f2'></body></html>"
+    },
+    {
+      "id": "reordered-dom-same-hooks",
+      "mutation": "reordered",
+      "description": "search box",
+      "action": "fill",
+      "expect": "q",
+      "html": "<html><body><nav><a href='/'>Home</a></nav><footer><input id='q' name='q' placeholder='Search products'></footer><main><input id='qty' name='qty'></main></body></html>"
+    },
+    {
+      "id": "i18n-text-changed",
+      "mutation": "i18n",
+      "description": "log in button",
+      "action": "click",
+      "expect": "auth-btn",
+      "html": "<html><body><button id='auth-btn' name='login'>Connexion</button><button id='reg-btn' name='register'>Inscription</button></body></html>"
+    },
+    {
+      "id": "restructured-wrapped-in-divs",
+      "mutation": "restructured",
+      "description": "accept terms checkbox",
+      "action": "check",
+      "expect": "terms",
+      "html": "<html><body><div><div><span><input id='terms' type='checkbox' name='acceptTerms'></span></div></div><input id='news' type='checkbox' name='newsletter'></body></html>"
+    },
+    {
+      "id": "distractor-three-buttons",
+      "mutation": "distractor",
+      "description": "delete account button",
+      "action": "click",
+      "expect": "delete-account",
+      "html": "<html><body><button id='delete-item'>Delete item</button><button id='delete-account'>Delete account</button><button id='delete-draft'>Delete draft</button></body></html>"
+    },
+    {
+      "id": "distractor-placeholder-vs-name",
+      "mutation": "distractor",
+      "description": "confirm password",
+      "action": "fill",
+      "expect": "pw2",
+      "html": "<html><body><input id='pw1' type='password' placeholder='Password'><input id='pw2' type='password' placeholder='Confirm password'></body></html>"
+    },
+    {
+      "id": "camelcase-identifier",
+      "mutation": "renamed_id",
+      "description": "first name",
+      "action": "fill",
+      "expect": "firstName",
+      "html": "<html><body><input id='firstName'><input id='lastName'></body></html>"
+    },
+    {
+      "id": "role-and-name",
+      "mutation": "dropped_testid",
+      "description": "next page link",
+      "action": "click",
+      "expect": "pager-next",
+      "html": "<html><body><a id='pager-prev' href='#'>Previous page</a><a id='pager-next' href='#'>Next page</a></body></html>"
+    }
+  ],
+  "negatives": [
+    {
+      "_comment": "Must NOT heal. Refusing is the correct answer; a confident wrong pick here is worse than an honest failure.",
+      "id": "absent-element",
+      "description": "download invoice button",
+      "action": "click",
+      "html": "<html><body><h1>Welcome</h1><p>Nothing actionable here.</p></body></html>"
+    },
+    {
+      "id": "unrelated-controls-only",
+      "description": "shopping basket icon",
+      "action": "click",
+      "html": "<html><body><input id='temperature' name='temperature'><select id='timezone'><option>UTC</option></select></body></html>"
+    }
+  ]
+}

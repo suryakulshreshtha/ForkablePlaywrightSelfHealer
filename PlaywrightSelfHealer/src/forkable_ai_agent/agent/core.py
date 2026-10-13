@@ -151,23 +151,33 @@ class ForkableAgent:
         started = self.ensure_app(plan.base_url) if autostart_app else False
         resolver = self.resolver
         executor = Executor(self.settings, resolver, self.analyzer, self.visual)
+        # Held by reference: ``Memory.save`` merges in other writers' runs, so
+        # "the last entry" is not necessarily this one when tests run in parallel.
+        summary: dict[str, Any] = {"name": plan.name, "at": time.time(), "source": plan.source}
+        session: Any = None
         try:
             with BrowserSession(self.settings, headless=not headed) as session:
                 result = executor.run(plan, session)
         finally:
-            self.memory.record_run({
-                "name": plan.name,
-                "at": time.time(),
-                "source": plan.source,
-            })
+            # Heals were already committed or parked by Executor.run; this only
+            # persists them. A run that crashed before then parks them here.
+            resolver.end_run(False)
+            self.memory.record_run(summary)
             self.memory.save()
             if started:
                 self.stop_app()
 
-        result.artifacts["healing_events"] = str(len(resolver.events))
-        if self.memory.runs:
-            self.memory.runs[-1].update({"status": result.status, "healed": result.healed_count})
-            self.memory.save()
+        # Only genuine repairs count; ambiguity, model errors and commit notices
+        # are events too, but they are not heals.
+        result.artifacts["healing_events"] = str(sum(1 for e in resolver.events if "kind" not in e))
+        ambiguous = sum(1 for e in resolver.events if e.get("kind") in {"ambiguous", "ambiguous_refused"})
+        if ambiguous:
+            result.artifacts["ambiguous_matches"] = str(ambiguous)
+        trace = getattr(session, "trace_path", "")
+        if trace:
+            result.artifacts["trace"] = trace
+        summary.update({"status": result.status, "healed": result.healed_count})
+        self.memory.save()
         return result
 
     def ask(self, question: str) -> tuple[str, list[Any]]:

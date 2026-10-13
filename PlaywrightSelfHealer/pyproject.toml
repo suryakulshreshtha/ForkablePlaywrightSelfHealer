@@ -18,12 +18,13 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Testing",
 ]
 
 # The agent core deliberately has no runtime dependency beyond Playwright.
 # Planning, RAG, healing, codegen and reporting all run on the standard library.
-dependencies = ["playwright>=1.40"]
+dependencies = ["playwright>=1.40,<2"]
 
 [project.optional-dependencies]
 visual = ["pillow>=10.0"]
@@ -31,6 +32,7 @@ chroma = ["chromadb>=0.5"]            # only if you want to share the sibling re
 dev = [
     "pytest>=8.0",
     "pytest-playwright>=0.5",
+    "pytest-cov>=5.0",
     "pillow>=10.0",
     "ruff>=0.5",
 ]
@@ -51,3 +53,12 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501", "B008"]
+
+[tool.coverage.run]
+source = ["src/forkable_ai_agent"]
+branch = false
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:", "raise NotImplementedError"]

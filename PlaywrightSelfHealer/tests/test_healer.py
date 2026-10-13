@@ -15,7 +15,7 @@ from forkable_ai_agent.agent.healer import (
 from forkable_ai_agent.agent.memory import Memory
 from forkable_ai_agent.browser.locators import build_candidates, core, variants
 from forkable_ai_agent.browser.snapshot import ElementInfo
-from tests.support.fake_page import FakePage
+from tests.support.fake_page import Document, FakePage
 
 
 def _resolver(settings):
@@ -169,3 +169,126 @@ def test_ranking_puts_the_human_choice_first(settings, demo_app, variant_v2):
     best, score = rank_elements("password", elements, "fill")[0]
     assert best.id == "pw_9x77"
     assert score > 0.34
+
+
+# -- resolution safety --------------------------------------------------
+# The three behaviours below distinguish a heal you can trust from one you
+# cannot. Each fails against the pre-fix resolver.
+
+
+def test_ambiguous_match_is_reported_not_silently_first(settings):
+    """A selector matching several elements must be flagged.
+
+    Resolving to `.first` and reporting a clean heal is how a self-healing
+    suite ends up asserting confidently against the wrong element.
+    """
+    page = FakePage()
+    page.document = Document(
+        "<html><body>"
+        '<button class="action">Delete</button>'
+        '<button class="action">Delete</button>'
+        '<button class="action">Delete</button>'
+        "</body></html>"
+    )
+    resolver = _resolver(settings)
+    resolution = resolver.resolve(page, "delete", "click")
+
+    assert resolution.match_count == 3
+    assert resolution.ambiguous is True
+    flagged = [e for e in resolver.events if e.get("kind") == "ambiguous"]
+    assert flagged, "an ambiguous resolution produced no event"
+    assert "3 elements matched" in flagged[0]["reason"]
+
+
+def test_unique_match_is_not_flagged(settings):
+    page = FakePage()
+    page.document = Document(
+        '<html><body><button id="delete-btn">Delete</button></body></html>'
+    )
+    resolution = _resolver(settings).resolve(page, "delete", "click")
+    assert resolution.match_count == 1
+    assert resolution.ambiguous is False
+
+
+def test_candidate_timeout_is_bounded_and_restored(settings):
+    """The ladder must not inherit the page's full default timeout.
+
+    Eight candidates at the 5s browser default is 40s of dead wait for one
+    missing element, before healing has even started.
+    """
+    seen: list[int] = []
+    page = FakePage()
+    page.document = Document(
+        '<html><body><input id="username" name="username"></body></html>'
+    )
+    page.set_default_timeout = seen.append  # type: ignore[attr-defined]
+
+    resolver = _resolver(settings)
+    resolver.resolve(page, "username", "fill")
+
+    assert seen, "the resolver never bounded the per-candidate timeout"
+    assert seen[0] == resolver.candidate_timeout_ms <= 500
+    # ...and it puts the page's own default back afterwards.
+    assert seen[-1] == settings.browser.default_timeout_ms
+
+
+def test_thresholds_come_from_settings(settings):
+    settings.healer.heuristic_threshold = 0.9
+    settings.healer.ask_llm_below = 0.95
+    settings.healer.candidate_timeout_ms = 111
+    resolver = _resolver(settings)
+    assert (resolver.heuristic_threshold, resolver.ask_llm_below) == (0.9, 0.95)
+    assert resolver.candidate_timeout_ms == 111
+    # An explicit argument still wins, so existing callers keep working.
+    assert LocatorResolver(
+        settings, Memory(settings.path(settings.memory_path)), heuristic_threshold=0.1
+    ).heuristic_threshold == 0.1
+
+
+def test_dead_model_falls_back_but_leaves_a_trace(settings):
+    """A dead Ollama must not break healing -- nor vanish from the report."""
+
+    class DeadModel:
+        name = "ollama"
+
+        def generate(self, *_a, **_k):
+            raise OSError("connection refused")
+
+    # Two anonymous fields: the heuristic cannot decide between them, which is
+    # exactly the case the model is there to break. Its death must degrade to
+    # the heuristic rather than propagate.
+    page = FakePage()
+    page.document = Document(
+        '<html><body><input id="field-a" name="field-a">'
+        '<input id="field-b" name="field-b"></body></html>'
+    )
+    settings.healer.heuristic_threshold = 0.05
+    resolver = LocatorResolver(
+        settings, Memory(settings.path(settings.memory_path)), llm=DeadModel()
+    )
+    resolution = resolver.heal(page, "password", "fill")
+
+    assert resolution.healed is True, "a dead model broke healing"
+    errors = [e for e in resolver.events if e.get("kind") == "llm_error"]
+    assert errors, "the model failure was swallowed silently"
+    assert "OSError" in errors[0]["reason"]
+
+
+def test_synonym_family_bridges_login_and_signin():
+    """"log in" -> "sign in" is the most common auth rename there is.
+
+    No character-level metric connects them: no shared prefix, no substring,
+    no trigram overlap. Without the synonym family this scores ~0.28 and the
+    heal is refused.
+    """
+    assert "signin" in variants("log in button")
+    assert "login" in variants("sign in")
+    element = ElementInfo(tag="button", id="signin-submit", text="Sign in")
+    assert score_element("log in button", element, "click") > 0.4
+
+
+def test_spelling_matching_a_token_of_an_identifier_scores():
+    """`#signin-submit` names the login button; whole-attribute equality misses it."""
+    for identifier in ("signin-submit", "btn-login", "login_button"):
+        element = ElementInfo(tag="button", id=identifier)
+        assert score_element("log in button", element, "click") > 0.3, identifier
