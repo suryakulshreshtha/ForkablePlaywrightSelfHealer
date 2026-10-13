@@ -31,6 +31,41 @@ top_k = 5
 hybrid_alpha = 0.6                  # 1.0 = pure dense, 0.0 = pure BM25
 embed_dim = 512
 
+[healer]
+# Tunables for locator resolution and healing. Measure a change before you keep
+# it:  python scripts/benchmark_healing.py --sweep
+heuristic_threshold = 0.34   # below this, refuse rather than guess
+ask_llm_below = 0.62         # below this, ask the local model to break the tie
+# Per-candidate budget when walking the locator ladder. Much shorter than
+# browser.default_timeout_ms on purpose: a candidate that is not on the page is
+# never *slowly* not on the page, and the ladder can be eight rungs deep.
+candidate_timeout_ms = 250
+warn_on_ambiguous = true     # flag heals that matched more than one element
+
+# What an *action* (click/fill/...) does when its selector matches several
+# elements:  "warn" acts on the first and records an event (default),
+# "fail" refuses, "first" acts silently. Assertions (expect_*) always fail on
+# ambiguity regardless - a check against "one of three" proves nothing. Use
+# "fail" for destructive flows (delete, pay, send).
+on_ambiguous = "warn"        # <-- change to "fail" for delete/pay/send flows
+
+# Healing is for elements that *changed*, not elements that have not rendered
+# yet. The ladder is re-tried for up to settle_ms before any heal is attempted,
+# and the DOM must be quiet for dom_quiet_ms before it is snapshotted.
+# Set both to 0 for static pages / fastest feedback.
+settle_ms = 1500
+settle_interval_ms = 150
+dom_quiet_ms = 150
+
+# Assertions never heal by default: "should see Welcome back" quietly rebound
+# to the nearest element turns a failing check into a passing one.
+heal_assertions = false
+
+# "on_pass": a heal is saved only if the run it happened in passed; heals from a
+# failed run are parked under `proposals` in memory.json for review.
+# "always": save immediately (the pre-hardening behaviour).
+commit_policy = "on_pass"
+
 [browser]
 engine = "chromium"                 # chromium | firefox | webkit
 headless = true
@@ -38,7 +73,11 @@ slow_mo_ms = 0
 viewport_width = 1280
 viewport_height = 800
 default_timeout_ms = 5000
-trace = false
+trace = false                       # keep a Playwright trace for every run
+trace_on_failure = true             # ...or only when the run did not pass
+ignore_https_errors = false         # <-- change to true only for self-signed HTTPS targets
+no_sandbox = "auto"                 # auto | always | never. auto = only as root / in a container / on CI
+capture_diagnostics = true          # console errors, page errors, failed requests, HTTP >= 400
 artifacts_dir = ".forkable/artifacts"
 
 [app]
