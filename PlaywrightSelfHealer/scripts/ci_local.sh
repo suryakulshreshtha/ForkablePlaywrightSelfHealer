@@ -14,7 +14,11 @@ step() {
 
 step "Lint"                     python3 -m ruff check src tests scripts
 step "Offline suite (no browser, no model)" env FORKABLE_OFFLINE=1 FORKABLE_LLM_PROVIDER=none \
-                                   python3 -m pytest -m "not e2e" -q
+                                   python3 -m pytest -m "not e2e" -q --cov --cov-report=term --cov-fail-under=80
+step "Healing accuracy must not regress" env FORKABLE_OFFLINE=1 \
+                                   python3 scripts/benchmark_healing.py --min-accuracy 0.90 --max-false-heals 0
+step "Mutation benchmark must not regress" env FORKABLE_OFFLINE=1 \
+                                   python3 scripts/mutation_benchmark.py --min-accuracy 0.94 --min-precision 1.0 --max-false-heals 0
 step "Prove nothing escapes"    python3 scripts/verify_offline.py
 step "Real browser suite"       python3 -m pytest -m e2e -q
 step "Build the RAG index"      python3 -m forkable_ai_agent index
@@ -25,7 +29,7 @@ printf '\n\033[1m==> Generated test runs standalone\033[0m\n'
 python3 -m forkable_ai_agent serve >/dev/null 2>&1 &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null || true' EXIT
-sleep 2
+python3 scripts/wait_for_port.py 127.0.0.1 8799 --timeout 30
 if python3 -m pytest tests/generated -o addopts="" --browser chromium -q; then
   printf '    \033[32mPASS\033[0m\n'
 else

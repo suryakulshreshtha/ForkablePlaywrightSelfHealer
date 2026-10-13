@@ -72,11 +72,26 @@ SNAPSHOT_JS = r"""
       label: labelFor(el),
       text: text,
       visible: visible,
+      editable: !!el.isContentEditable,
       css: uniquePath(el)
     });
   }
   return out;
 }
+"""
+
+# Executed against one already-located element. Returns just the facts needed to
+# decide whether it is the *kind* of element a description names ("log in
+# button" must not bind to an <h1> that merely contains the words).
+ELEMENT_INFO_JS = r"""
+(el) => ({
+  tag: el.tagName.toLowerCase(),
+  type: (el.getAttribute('type') || '').toLowerCase(),
+  role: (el.getAttribute('role') || '').toLowerCase(),
+  href: el.hasAttribute('href'),
+  editable: !!el.isContentEditable,
+  text: ((el.innerText || el.value || el.getAttribute('aria-label') || '') + '').trim().slice(0, 160)
+})
 """
 
 
@@ -95,6 +110,7 @@ class ElementInfo:
     label: str = ""
     text: str = ""
     visible: bool = True
+    editable: bool = False
     css: str = ""
 
     @classmethod
@@ -135,6 +151,23 @@ def capture(page: Any, limit: int = 120, visible_only: bool = True) -> list[Elem
         return []
     items = [ElementInfo.from_dict(r) for r in raw or []]
     return [i for i in items if i.visible] if visible_only else items
+
+
+def inspect_locator(locator: Any, timeout_ms: int = 500) -> dict[str, Any] | None:
+    """Tag/type/role facts for the first element *locator* points at.
+
+    Returns ``None`` when the element cannot be inspected (detached mid-call, a
+    locator type without ``evaluate``). Callers treat that as "unknown", never as
+    a match or a mismatch, so a flaky inspection cannot fail a test on its own.
+    """
+    try:
+        try:
+            info = locator.evaluate(ELEMENT_INFO_JS, timeout=timeout_ms)
+        except TypeError:  # a harness locator that takes no timeout keyword
+            info = locator.evaluate(ELEMENT_INFO_JS)
+    except Exception:
+        return None
+    return info if isinstance(info, dict) else None
 
 
 def render(elements: Sequence[ElementInfo], limit: int = 60) -> str:

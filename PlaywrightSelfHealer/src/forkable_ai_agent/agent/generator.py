@@ -5,27 +5,69 @@ The generator prefers locators the agent has already *proven* on a live page
 That is the difference between generated code that works and generated code
 that merely looks plausible.
 
-Every emitted file is parsed with :mod:`ast` and scanned against an import and
-call allowlist before it is written. Code produced by a language model is
-untrusted input, and treating it that way is not optional.
+Plans are untrusted input: they come from a language model or from a file, and
+their text ends up inside source code that somebody will run. Two defences, both
+required:
+
+* **Nothing is interpolated raw.** Every value reaches the emitted source as a
+  ``json.dumps``-style literal (which escapes newlines and quotes) or, for text
+  that lands in a comment or docstring, is flattened to one safe line first.
+* **The emitted module is validated against an allowlist** - the only syntax,
+  names, imports and method calls the generator can legitimately produce - before
+  it is written. A denylist of "dangerous" calls is always one ``open()`` short
+  of useless; an allowlist fails closed.
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from ..browser.locators import LocatorCandidate, build_candidates
-from ..schema import ELEMENT_ACTIONS, Step, TestPlan
+from ..browser.locators import LocatorCandidate, build_candidates, py_literal
+from ..schema import ELEMENT_ACTIONS, Step, TestPlan, wait_seconds
 from .memory import Memory, scope_for
 
-ALLOWED_IMPORTS = {"re", "os", "json", "time", "pytest", "playwright", "playwright.sync_api", "pathlib"}
-BANNED_CALLS = {"eval", "exec", "compile", "__import__", "input", "breakpoint"}
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+ALLOWED_IMPORTS = {"re", "pytest", "playwright.sync_api"}
+ALLOWED_FROM_NAMES = {"playwright.sync_api": {"Page", "expect"}}
+
+#: Kept for callers that import them; the allowlist below is what actually gates.
+BANNED_CALLS = {"eval", "exec", "compile", "__import__", "input", "breakpoint", "open", "getattr",
+                "setattr", "delattr", "globals", "locals", "vars", "dir"}
 BANNED_ATTRS = {"system", "popen", "spawn", "spawnl", "check_output", "call", "run"}
-BANNED_MODULES = {"subprocess", "socket", "shutil", "requests", "urllib", "httpx", "ctypes", "pickle"}
+BANNED_MODULES = {"subprocess", "socket", "shutil", "requests", "urllib", "httpx", "ctypes", "pickle",
+                  "os", "pathlib", "sys", "importlib", "builtins"}
+
+#: The only syntax the generator emits.
+ALLOWED_NODES: tuple[type, ...] = (
+    ast.Module, ast.Expr, ast.Constant, ast.Import, ast.ImportFrom, ast.alias, ast.Assign, ast.Assert,
+    ast.FunctionDef, ast.arguments, ast.arg, ast.Name, ast.Load, ast.Store, ast.Attribute, ast.Call,
+    ast.keyword, ast.Subscript, ast.Compare, ast.In, ast.Eq, ast.JoinedStr, ast.FormattedValue,
+    ast.BinOp, ast.Add, ast.Dict, ast.List, ast.Tuple, ast.UnaryOp, ast.USub, ast.Not, ast.Pass,
+)
+
+#: The only bare names that may appear (True/False/None are Constants).
+ALLOWED_NAMES = {"page", "response", "re", "pytest", "expect", "str", "Page", "BASE_URL"}
+
+#: The only attributes that may be read or called. Every one is a Playwright /
+#: pytest / re / str API the generator itself emits.
+ALLOWED_ATTRS = {
+    "mark", "forkable", "request", "status", "I", "IGNORECASE",
+    "get_by_role", "get_by_label", "get_by_placeholder", "get_by_text", "locator",
+    "click", "fill", "press", "check", "uncheck", "hover", "select_option",
+    "goto", "wait_for_timeout", "screenshot",
+    "get", "post", "put", "patch", "delete", "head", "json", "text", "lower", "compile",
+    "to_be_visible", "to_have_value", "to_have_url", "to_have_title",
+    "to_contain_text", "not_to_contain_text",
+}
+ALLOWED_CALL_NAMES = {"expect", "str"}
 
 
 class UnsafeGeneratedCode(ValueError):
@@ -47,7 +89,12 @@ class GeneratedTest:
 
 
 def validate_code(code: str) -> None:
-    """Parse and lint generated source. Raises :class:`UnsafeGeneratedCode`."""
+    """Parse generated source and check it against the allowlist.
+
+    Raises :class:`UnsafeGeneratedCode`. Anything the generator does not itself
+    emit - another import, ``open()``, an attribute walk to ``__class__`` - is
+    refused, whatever it would have done.
+    """
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
@@ -56,25 +103,101 @@ def validate_code(code: str) -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                root = alias.name.split(".")[0]
-                if root in BANNED_MODULES or alias.name not in ALLOWED_IMPORTS and root not in ALLOWED_IMPORTS:
+                if alias.name not in ALLOWED_IMPORTS or alias.asname:
                     raise UnsafeGeneratedCode(f"import of {alias.name!r} is not allowed")
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            root = module.split(".")[0]
-            if root in BANNED_MODULES or (module not in ALLOWED_IMPORTS and root not in ALLOWED_IMPORTS):
+            allowed = ALLOWED_FROM_NAMES.get(module)
+            if node.level or allowed is None:
                 raise UnsafeGeneratedCode(f"import from {module!r} is not allowed")
+            for alias in node.names:
+                if alias.name not in allowed or alias.asname:
+                    raise UnsafeGeneratedCode(f"import of {module}.{alias.name} is not allowed")
         elif isinstance(node, ast.Call):
             func = node.func
-            if isinstance(func, ast.Name) and func.id in BANNED_CALLS:
-                raise UnsafeGeneratedCode(f"call to {func.id}() is not allowed")
-            if isinstance(func, ast.Attribute) and func.attr in BANNED_ATTRS:
-                if isinstance(func.value, ast.Name) and func.value.id in {"os", "subprocess"}:
-                    raise UnsafeGeneratedCode(f"call to {func.value.id}.{func.attr}() is not allowed")
+            if isinstance(func, ast.Name):
+                if func.id not in ALLOWED_CALL_NAMES:
+                    raise UnsafeGeneratedCode(f"call to {func.id}() is not allowed")
+        elif isinstance(node, ast.Name):
+            if node.id not in ALLOWED_NAMES:
+                raise UnsafeGeneratedCode(f"name {node.id!r} is not allowed")
+        elif isinstance(node, ast.Attribute):
+            if node.attr not in ALLOWED_ATTRS:
+                raise UnsafeGeneratedCode(f"attribute {node.attr!r} is not allowed")
+        elif not isinstance(node, ALLOWED_NODES):
+            raise UnsafeGeneratedCode(f"syntax element {type(node).__name__} is not allowed")
+
+        # ALLOWED_NODES covers the generic cases above; the specific branches
+        # still need the node-type gate for the types they handle.
+        if not isinstance(node, ALLOWED_NODES):
+            raise UnsafeGeneratedCode(f"syntax element {type(node).__name__} is not allowed")
 
 
-def _py_str(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+# ---------------------------------------------------------------------------
+# Safe emission helpers
+# ---------------------------------------------------------------------------
+def _py_str(value: Any) -> str:
+    """A complete, double-quoted Python string literal. Newlines cannot escape it."""
+    return py_literal(str(value))
+
+
+def _inline(text: Any, limit: int = 200) -> str:
+    """Flatten arbitrary text to one safe line for a comment or docstring.
+
+    Control characters and every kind of line break collapse to a space, and the
+    characters that could close a string or start an escape are neutralised, so
+    the text cannot end the comment (new line) or the docstring (``\"\"\"``).
+    """
+    printable = "".join(ch if (ch.isprintable() or ch.isspace()) else " " for ch in str(text or ""))
+    flat = " ".join(printable.split())
+    flat = flat.replace("\\", "/").replace('"', "'")
+    return flat[:limit]
+
+
+_SAFE_PATH = re.compile(r"^[A-Za-z0-9/_\-.~%?=&#:@!$()*+,;]*$")
+
+
+def _url_expr(path: str) -> str:
+    """Source for ``BASE_URL`` + *path* that cannot be broken out of."""
+    path = path if path.startswith("/") else "/" + path
+    if _SAFE_PATH.match(path):
+        return f'f"{{BASE_URL}}{path}"'
+    return f"BASE_URL + {_py_str(path)}"
+
+
+def _reject_constant(name: str) -> Any:
+    raise ValueError(name)
+
+
+def _data_kwarg(value: str) -> str:
+    """``, data=<literal>`` for an API body, or ``""`` when there is none.
+
+    JSON is parsed and re-emitted as a *Python* literal, so ``true`` becomes
+    ``True`` and ``null`` becomes ``None``. Pasting the JSON text in raw (as this
+    used to) produced ``NameError`` at test time while still passing validation.
+    """
+    if not value:
+        return ""
+    try:
+        parsed: Any = json.loads(value, parse_constant=_reject_constant)
+    except ValueError:  # includes JSONDecodeError and NaN/Infinity
+        parsed = value
+    return f", data={parsed!r}"
+
+
+def _test_name(raw: str) -> str:
+    """A name usable in both ``def test_<name>`` and a filename.
+
+    ``TestPlan.from_dict`` already slugifies, but a plan built in code does not,
+    and the name lands in a ``def`` line and a file path.
+    """
+    return re.sub(r"[^A-Za-z0-9_]+", "_", str(raw or "")).strip("_") or "generated_test"
+
+
+def _artifact_name(raw: str, fallback: str) -> str:
+    """A filename that cannot climb out of the artifacts directory."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", raw or "").lstrip(".")
+    return cleaned or fallback
 
 
 class TestGenerator:
@@ -110,6 +233,7 @@ class TestGenerator:
     # ------------------------------------------------------------------
     def generate(self, plan: TestPlan) -> GeneratedTest:
         base = plan.base_url or self.settings.app.base_url
+        name = _test_name(plan.name)
         lines: list[str] = []
         used: list[str] = []
         scope = "/"
@@ -117,9 +241,9 @@ class TestGenerator:
         header = [
             '"""Generated by PlaywrightSelfHealer - do not edit by hand.',
             "",
-            f"Plan: {plan.name}",
-            f"Source: {plan.source}",
-            f"Spec: {(plan.description or '').strip()[:150]}",
+            f"Plan: {_inline(plan.name, 80)}",
+            f"Source: {_inline(plan.source, 40)}",
+            f"Spec: {_inline(plan.description, 150)}",
             "",
             "Regenerate with:  forkable generate --spec <file>",
             '"""',
@@ -133,7 +257,7 @@ class TestGenerator:
             "",
             "",
             "@pytest.mark.forkable",
-            f"def test_{plan.name}(page: Page) -> None:",
+            f"def test_{name}(page: Page) -> None:",
         ]
 
         for step in plan.steps:
@@ -147,7 +271,7 @@ class TestGenerator:
 
         code = "\n".join(header + lines) + "\n"
         validate_code(code)
-        return GeneratedTest(name=plan.name, code=code, locators=used)
+        return GeneratedTest(name=name, code=code, locators=used)
 
     # ------------------------------------------------------------------
     def _step_code(self, step: Step, scope: str) -> tuple[list[str], str, str]:
@@ -155,7 +279,7 @@ class TestGenerator:
         note = ""
         out: list[str] = []
         if step.note:
-            out.append(f"    # {step.note}")
+            out.append(f"    # {_inline(step.note)}")
 
         if action == "goto":
             target = step.target or "/"
@@ -163,33 +287,30 @@ class TestGenerator:
             if target.startswith(("http://", "https://")):
                 out.append(f"    page.goto({_py_str(target)})")
             else:
-                out.append(f'    page.goto(f"{{BASE_URL}}{target if target.startswith("/") else "/" + target}")')
+                out.append(f"    page.goto({_url_expr(target)})")
             return out, scope, note
 
         if action == "wait":
-            seconds = float(step.value or "1")
-            out.append(f"    page.wait_for_timeout({int(seconds * 1000)})")
+            out.append(f"    page.wait_for_timeout({int(wait_seconds(step.value) * 1000)})")
             return out, scope, note
 
         if action == "screenshot":
-            name = step.value or "screenshot"
-            out.append(f'    page.screenshot(path={_py_str(f".forkable/artifacts/{name}.png")})')
+            name = _artifact_name(step.value, "screenshot")
+            out.append(f"    page.screenshot(path={_py_str(f'.forkable/artifacts/{name}.png')})")
             return out, scope, note
 
         if action == "visual_check":
-            # Nested same-quote f-strings are a syntax error before 3.12, so
-            # build the path first rather than inlining it.
-            name = step.value or "page"
-            out.append(f"    # visual baseline check '{name}' runs through the agent runtime")
-            out.append(f'    page.screenshot(path={_py_str(f".forkable/artifacts/{name}.png")})')
+            # Build the path first: nested same-quote f-strings are a syntax
+            # error before Python 3.12.
+            name = _artifact_name(step.value, "page")
+            out.append(f"    # visual baseline check '{_inline(name, 60)}' runs through the agent runtime")
+            out.append(f"    page.screenshot(path={_py_str(f'.forkable/artifacts/{name}.png')})")
             return out, scope, note
 
         if action == "api_request":
             method, _, path = step.target.partition(" ")
-            body = f", data={step.value}" if step.value else ""
-            url = (_py_str(path) if path.startswith("http")
-                   else f'f"{{BASE_URL}}{path if path.startswith("/") else "/" + path}"')
-            out.append(f"    response = page.request.{method.lower()}({url}{body})")
+            url = _py_str(path) if path.startswith("http") else _url_expr(path)
+            out.append(f"    response = page.request.{method.lower()}({url}{_data_kwarg(step.value)})")
             return out, scope, note
 
         if action == "expect_status":
@@ -212,12 +333,18 @@ class TestGenerator:
             out.append(f"    expect(page).to_have_title(re.compile({_py_str(re.escape(step.value))}, re.I))")
             return out, scope, note
 
+        # The executor compares text case-insensitively, so the generated test must
+        # too - otherwise a plan can pass in a run and fail in the file made from it.
         if action == "expect_text":
-            out.append(f'    expect(page.locator("body")).to_contain_text({_py_str(step.value)})')
+            out.append(
+                f'    expect(page.locator("body")).to_contain_text({_py_str(step.value)}, ignore_case=True)'
+            )
             return out, scope, note
 
         if action == "expect_no_text":
-            out.append(f'    expect(page.locator("body")).not_to_contain_text({_py_str(step.value)})')
+            out.append(
+                f'    expect(page.locator("body")).not_to_contain_text({_py_str(step.value)}, ignore_case=True)'
+            )
             return out, scope, note
 
         if action in ELEMENT_ACTIONS:
@@ -242,7 +369,7 @@ class TestGenerator:
                 out.append(f"    expect({locator}).to_have_value(re.compile({_py_str(re.escape(step.value))}, re.I))")
             return out, scope, note
 
-        out.append(f"    # unsupported action: {action}")
+        out.append(f"    # unsupported action: {_inline(action, 40)}")
         return out, scope, note
 
     # ------------------------------------------------------------------

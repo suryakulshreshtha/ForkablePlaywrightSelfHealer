@@ -15,7 +15,15 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import urljoin
 
-from ..schema import API_ACTIONS, ELEMENT_ACTIONS, RunResult, Step, StepResult, TestPlan
+from ..schema import (
+    API_ACTIONS,
+    ELEMENT_ACTIONS,
+    RunResult,
+    Step,
+    StepResult,
+    TestPlan,
+    wait_seconds,
+)
 from .healer import LocatorResolver
 
 
@@ -68,29 +76,49 @@ class Executor:
         result = RunResult(plan=plan)
         timeout = self.settings.browser.default_timeout_ms
 
-        for index, step in enumerate(plan.steps, start=1):
-            started = time.perf_counter()
-            record = StepResult(index=index, step=step)
-            try:
-                self._execute(plan, page, session, step, record, timeout)
-                record.status = "passed"
-            except Exception as exc:
-                record.message = f"{type(exc).__name__}: {exc}"
-                record.status = "warned" if step.optional else "failed"
-                record.screenshot = session.screenshot(f"fail_step_{index}")
-            record.duration_ms = round((time.perf_counter() - started) * 1000, 1)
-            result.steps.append(record)
-            if self.on_step:
-                self.on_step(record)
-            if record.status == "failed":
-                result.status = "failed"
-                break
+        # Heals are a transaction: the resolver holds them while the run is in
+        # flight, saves them if it passes and parks them for review if it fails.
+        begin_run = getattr(self.resolver, "begin_run", None)
+        end_run = getattr(self.resolver, "end_run", None)
+        if begin_run is not None:
+            begin_run()
+        passed = False
+        try:
+            for index, step in enumerate(plan.steps, start=1):
+                started = time.perf_counter()
+                record = StepResult(index=index, step=step)
+                try:
+                    # _execute may downgrade the record itself (e.g. "warned");
+                    # a clean return must not overwrite that.
+                    self._execute(plan, page, session, step, record, timeout)
+                except Exception as exc:
+                    record.message = f"{type(exc).__name__}: {exc}"
+                    record.status = "warned" if step.optional else "failed"
+                    record.screenshot = session.screenshot(f"fail_step_{index}")
+                record.duration_ms = round((time.perf_counter() - started) * 1000, 1)
+                result.steps.append(record)
+                if self.on_step:
+                    self.on_step(record)
+                if record.status == "failed":
+                    result.status = "failed"
+                    break
 
-        result.finished_at = time.time()
-        if result.status != "failed":
-            result.status = "passed"
-        if result.status == "failed" and self.analyzer is not None:
-            result.diagnosis = self.analyzer.analyze_run(result)
+            result.finished_at = time.time()
+            if result.status != "failed":
+                result.status = "passed"
+            passed = result.status == "passed"
+
+            collect = getattr(session, "collect_diagnostics", None)
+            if collect is not None:
+                result.diagnostics = collect()
+            mark = getattr(session, "mark_result", None)
+            if mark is not None:
+                mark(passed)
+            if result.status == "failed" and self.analyzer is not None:
+                result.diagnosis = self.analyzer.analyze_run(result)
+        finally:
+            if end_run is not None:
+                end_run(passed)
         return result
 
     # ------------------------------------------------------------------
@@ -184,8 +212,7 @@ class Executor:
             return
 
         if action == "wait":
-            seconds = float(step.value or "1")
-            time.sleep(min(seconds if seconds < 100 else seconds / 1000.0, 30.0))
+            time.sleep(wait_seconds(step.value))
             return
 
         if action == "screenshot":
@@ -240,6 +267,11 @@ class Executor:
             record.selector = resolution.candidate.describe()
             record.strategy = resolution.strategy
             record.healed = resolution.healed
+            if resolution.ambiguous:
+                record.message = (
+                    f"ambiguous: {resolution.match_count} elements matched "
+                    f"{resolution.candidate.describe()}; the first was used"
+                )
             locator = resolution.locator
 
             if action == "click":

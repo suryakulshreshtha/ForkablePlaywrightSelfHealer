@@ -261,6 +261,19 @@ class FakeLocator:
     def is_visible(self) -> bool:
         return bool(self.nodes) and self.nodes[0].visible
 
+    def evaluate(self, script: str, arg: Any = None, timeout: int = 0) -> dict[str, Any]:
+        """Mirror of ``ELEMENT_INFO_JS``: the kind-of-element facts for the first node."""
+        node = self._node()
+        editable = "contenteditable" in node.attrs and node.get("contenteditable") != "false"
+        return {
+            "tag": node.tag,
+            "type": node.get("type").lower(),
+            "role": node.get("role").lower(),
+            "href": "href" in node.attrs,
+            "editable": editable,
+            "text": (node.text.strip() or node.value or node.get("aria-label")).strip()[:160],
+        }
+
     def fill(self, value: str, timeout: int = 0) -> None:
         self._node().value = value
 
@@ -505,6 +518,8 @@ class FakePage:
 
     def evaluate(self, script: str, arg: Any = None) -> list[dict[str, Any]]:
         """Return the same shape the injected snapshot JS produces."""
+        if isinstance(arg, dict):  # e.g. the DOM-quiet wait: nothing mutates here
+            return None  # type: ignore[return-value]
         limit = int(arg or 120)
         out: list[dict[str, Any]] = []
         interesting = {"a", "button", "input", "select", "textarea", "label", "h1", "h2", "h3"}
@@ -528,6 +543,7 @@ class FakePage:
                 "label": node.label_text(self.document),
                 "text": node.text[:80],
                 "visible": node.visible,
+                "editable": "contenteditable" in node.attrs and node.get("contenteditable") != "false",
                 "css": node.css_path,
             })
         return out
@@ -549,3 +565,11 @@ class FakeSession:
 
     def __exit__(self, *exc: object) -> None:
         return None
+
+
+def page_from_html(html: str, url: str = "") -> FakePage:
+    """A FakePage holding ``html`` with no server behind it (for unit tests)."""
+    page = FakePage()
+    page.url = url
+    page.document = Document(f"<html><body>{html}</body></html>")
+    return page

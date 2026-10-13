@@ -3,8 +3,19 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]   # a typo fix should not cost minutes
   pull_request:
   workflow_dispatch:
+
+# Least privilege. Without this the job inherits the repository default token,
+# which is frequently contents: write -- handed to every dependency in the tree.
+permissions:
+  contents: read
+
+# Three pushes in a minute should not run three full matrices.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -13,15 +24,19 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25          # without this a hung browser burns the 360m default
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to commit SHAs (a tag can be repointed at any commit
+      # by whoever controls the action). Dependabot (.github/dependabot.yml)
+      # keeps the SHAs current; the trailing comment names the release.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -32,7 +47,7 @@ jobs:
           pip install -e ".[dev,visual]"
 
       - name: Lint
-        run: ruff check src tests
+        run: ruff check src tests scripts
 
       # These need no browser and no model: the DOM harness covers planning,
       # healing, execution, codegen and reporting on their own.
@@ -40,13 +55,31 @@ jobs:
         env:
           FORKABLE_OFFLINE: "1"
           FORKABLE_LLM_PROVIDER: none
-        run: python -m pytest -m "not e2e" -q
+        run: python -m pytest -m "not e2e" -q --cov --cov-report=term --cov-fail-under=80
+
+      # Turns "it heals" from a claim into a number that can regress. Floors sit
+      # below the current result (100%, 0 false heals) so a genuine improvement
+      # is never blocked by its own gate, while a regression is.
+      # --max-false-heals 0 is the one that matters: a confident wrong answer is
+      # worse than an honest refusal.
+      - name: Healing accuracy must not regress
+        env:
+          FORKABLE_OFFLINE: "1"
+        run: python scripts/benchmark_healing.py --min-accuracy 0.90 --max-false-heals 0
+
+      # Generated cases (renamed ids, churned classes, wrappers, rewording,
+      # look-alike decoys, removed controls). Measured at 96.3% accuracy, 100%
+      # precision, 0 false heals; floors sit just under the measured values.
+      - name: Mutation benchmark must not regress
+        env:
+          FORKABLE_OFFLINE: "1"
+        run: python scripts/mutation_benchmark.py --min-accuracy 0.94 --min-precision 1.0 --max-false-heals 0
 
       - name: Prove nothing escapes the machine
         run: python scripts/verify_offline.py
 
       - name: Cache browser bundle
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
           key: pw-${{ runner.os }}-${{ hashFiles('PlaywrightSelfHealer/pyproject.toml') }}
@@ -63,14 +96,17 @@ jobs:
         run: |
           python -m forkable_ai_agent generate --file examples/nl_specs/login.txt --out tests/generated
           python -m forkable_ai_agent serve &
-          sleep 2
+          # Was `sleep 2`. A cold runner regularly needs longer and the job then
+          # failed for a reason unrelated to the change under test. Never sleep
+          # for a readiness condition you can poll.
+          python scripts/wait_for_port.py 127.0.0.1 8799 --timeout 30
           python -m pytest tests/generated -o addopts="" --browser chromium -q
         env:
           PYTHONPATH: src
 
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: forkable-reports-py${{ matrix.python-version }}
           path: |

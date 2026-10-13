@@ -59,6 +59,30 @@ class PlanError(ValueError):
     """Raised when a plan cannot be parsed or validated."""
 
 
+#: Longest a single ``wait`` step may pause. A plan is not a place to park a run.
+MAX_WAIT_SECONDS = 30.0
+
+
+def wait_seconds(value: str | float | None) -> float:
+    """Seconds a ``wait`` step pauses for.
+
+    Below 100 the value is seconds; from 100 up it is milliseconds ("500" means
+    half a second). Unparseable or negative input falls back to one second, and
+    the result is capped at :data:`MAX_WAIT_SECONDS`. The executor and the
+    generator both call this, so a plan sleeps for the same time in a run and in
+    the pytest file generated from it (they used to disagree by 1000x).
+    """
+    try:
+        seconds = float(value if value not in (None, "") else 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    if seconds != seconds or seconds < 0:  # NaN or negative
+        return 1.0
+    if seconds >= 100:
+        seconds /= 1000.0
+    return min(seconds, MAX_WAIT_SECONDS)
+
+
 @dataclass
 class Step:
     action: str
@@ -173,6 +197,10 @@ class RunResult:
     finished_at: float = 0.0
     diagnosis: Diagnosis | None = None
     artifacts: dict[str, str] = field(default_factory=dict)
+    #: What the page itself reported while the plan ran: console errors,
+    #: uncaught exceptions, failed requests and HTTP >= 400 responses. Empty
+    #: when nothing went wrong or capture is off.
+    diagnostics: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def healed_count(self) -> int:
@@ -193,6 +221,7 @@ class RunResult:
             "healed_count": self.healed_count,
             "diagnosis": self.diagnosis.to_dict() if self.diagnosis else None,
             "artifacts": self.artifacts,
+            "diagnostics": self.diagnostics,
         }
 
 

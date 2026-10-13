@@ -1,5 +1,5 @@
 # Runtime. Everything else the agent needs is in the standard library.
-playwright>=1.40
+playwright>=1.40,<2
 
 # Optional but recommended:
 pillow>=10.0        # visual regression diffs (without it, visual checks warn)

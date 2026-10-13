@@ -43,6 +43,9 @@ h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted
 .panel{background:#fff;border:1px solid var(--line);border-left:3px solid var(--bad);border-radius:8px;padding:14px 16px}
 .panel dt{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-top:8px}
 .panel dd{margin:2px 0 0}
+.panel.note{border-left-color:var(--warn)}
+.panel ul{margin:4px 0 0;padding-left:18px}
+.panel li{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;word-break:break-word}
 footer{color:var(--muted);font-size:12px;margin-top:34px}
 """
 
@@ -90,6 +93,67 @@ def render_html(result: RunResult, memory: Any = None) -> str:
           </dl>
         </div>"""
 
+    diagnostics = getattr(result, "diagnostics", None) or {}
+    labels = {
+        "page_errors": "Uncaught JavaScript errors",
+        "console_errors": "Console errors",
+        "failed_requests": "Failed requests",
+        "http_errors": "HTTP error responses",
+    }
+    diag_sections = "".join(
+        f"<dt>{labels.get(key, html.escape(key))} ({len(items)})</dt><dd><ul>"
+        + "".join(f"<li>{html.escape(str(item))}</li>" for item in items[:10])
+        + "</ul></dd>"
+        for key, items in diagnostics.items() if items
+    )
+    # Page evidence matters most when something failed or the page threw; on a
+    # clean pass it is noise, so it only appears when there is a reason to look.
+    page_block = ""
+    if diag_sections and (result.status == "failed" or diagnostics.get("page_errors")):
+        page_block = f"""
+        <h2>What the page reported</h2>
+        <div class="panel note"><dl>{diag_sections}</dl></div>"""
+
+    ambiguous_steps = [
+        s for s in result.steps if "uniquely" in (s.message or "") or "elements matched" in (s.message or "")
+    ]
+    ambiguity_block = ""
+    if ambiguous_steps:
+        items = "".join(
+            f"<li>step {s.index}: {html.escape(s.step.target or s.step.action)} - {html.escape(s.message)}</li>"
+            for s in ambiguous_steps
+        )
+        ambiguity_block = f"""
+        <h2>Ambiguous selectors</h2>
+        <div class="panel note"><dl><dt>These steps matched more than one element</dt>
+        <dd><ul>{items}</ul></dd></dl></div>"""
+
+    trace = (getattr(result, "artifacts", None) or {}).get("trace", "")
+    trace_block = ""
+    if trace:
+        trace_block = f"""
+        <h2>Trace</h2>
+        <div class="panel note"><dl><dt>Playwright trace</dt>
+        <dd class="mono">{html.escape(trace)}</dd>
+        <dt>Open with</dt><dd class="mono">python -m playwright show-trace {html.escape(trace)}</dd></dl></div>"""
+
+    proposals_block = ""
+    proposals = list(getattr(memory, "proposals", []) or [])[-10:] if memory is not None else []
+    if proposals:
+        body = "".join(
+            "<tr>"
+            f"<td class='mono'>{html.escape(str(p.get('scope', '')))}</td>"
+            f"<td>{html.escape(str(p.get('description', '')))}</td>"
+            f"<td class='mono'>{html.escape(str(p.get('key', '')))}</td>"
+            f"<td>{html.escape(str(p.get('reason', '')))}</td>"
+            "</tr>"
+            for p in reversed(proposals)
+        )
+        proposals_block = f"""
+        <h2>Heals held for review (not trusted)</h2>
+        <table><thead><tr><th>Scope</th><th>Description</th><th>Locator</th><th>Why held</th></tr></thead>
+        <tbody>{body}</tbody></table>"""
+
     healing_block = ""
     if memory is not None:
         healed_rows = [r for r in memory.healing_report() if r["healed"]][:15]
@@ -132,7 +196,11 @@ def render_html(result: RunResult, memory: Any = None) -> str:
     <th>Status</th><th>Time</th><th>Detail</th></tr></thead>
   <tbody>{''.join(rows)}</tbody></table>
   {diagnosis_block}
+  {page_block}
+  {ambiguity_block}
+  {trace_block}
   {healing_block}
+  {proposals_block}
   <footer>Generated offline by PlaywrightSelfHealer. No external resources are referenced by this file.</footer>
 </main></body></html>"""
 
