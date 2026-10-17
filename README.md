@@ -1,3 +1,7 @@
+<!-- forkable-card:start (added by apply_cards.py; re-run it to update) -->
+![Playwright Self-Healer: self-healing Playwright tests from plain-English specs, repairing broken locators offline](.github/assets/forkable-card.png)
+<!-- forkable-card:end -->
+
 # ForkablePlaywrightSelfHealer
 
 [![CI](https://github.com/suryakulshreshtha/ForkablePlaywrightSelfHealer/actions/workflows/ci.yml/badge.svg)](https://github.com/suryakulshreshtha/ForkablePlaywrightSelfHealer/actions/workflows/ci.yml)
